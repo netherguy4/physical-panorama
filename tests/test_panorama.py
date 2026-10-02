@@ -2,6 +2,7 @@
 """Run with python3 tests/test_panorama.py; isolated temporary state, no desktop changes."""
 import copy
 import json
+import os
 import shutil
 import sys
 import threading
@@ -162,12 +163,31 @@ with tempfile.TemporaryDirectory() as temporary:
  assert {e[1] for e in events[1:]}=={'other1','other2'}
  assert len({e[2] for e in events[1:]})==2
  barrier=None;events.clear()
+ # fit follows a stepwise hotplug until the layout is stable and never prepares other images.
+ sequence=iter([small_layout,changed_layout,changed_layout,changed_layout])
+ panorama.geometry=lambda settings:next(sequence)
+ saved_sleep=panorama.time.sleep;panorama.time.sleep=lambda seconds:None
+ sys.argv=['panorama','fit'];panorama.main()
+ panorama.time.sleep=saved_sleep;panorama.geometry=lambda settings:small_layout
+ assert [e[:2] for e in events]==[('apply','current'),('render','current'),('apply','current')]
+ assert json.loads((panorama.STATE/'state.json').read_text())['layout']==changed_layout
+ # Other layouts' caches survive until unused for keep_days; incomplete ones go immediately.
+ generations=panorama.STATE/'generations'
+ for name in ('recent-layout','stale-layout'):
+  (generations/name).mkdir();(generations/name/'geometry.json').write_text(json.dumps(dict(layout=dict(outputs=[]))))
+ os.utime(generations/'stale-layout',(0,0));(generations/'partial.tmp').mkdir()
+ panorama.prune(rows,small_layout,{})
+ assert (generations/'recent-layout').exists() and not (generations/'stale-layout').exists() and not (generations/'partial.tmp').exists()
+ assert panorama.ready(panorama.generation_path(rows[1],small_layout,{}),small_layout)
+ assert (panorama.STATE/'current').resolve().exists()
+ events.clear()
  original_run=panorama.subprocess.run
  panorama.subprocess.run=lambda command,**kwargs:events.append(('systemctl',command[2:]))
  sys.argv=['panorama','static'];panorama.main()
  units=panorama.units()
  assert all((panorama.UNITS/name).read_text()==body for name,body in units.items())
  assert sys.executable in units['physical-panorama.service'] and 'PathChanged=%S/cosmic-comp/outputs.ron' in units['physical-panorama-layout.path']
+ assert '.py" fit\n' in units['physical-panorama-reload.service']
  assert events[0]==('systemctl',['daemon-reload'])
  assert ('systemctl',['disable','--now','physical-panorama.timer','physical-panorama-layout.path']) in events
  assert ('apply','current') in events
@@ -176,4 +196,4 @@ with tempfile.TemporaryDirectory() as temporary:
  # Units are unchanged, so no daemon-reload.
  assert events==[('systemctl',['disable','physical-panorama-reload.service']),('systemctl',['enable','--now','physical-panorama.timer','physical-panorama-layout.path'])]
  panorama.subprocess.run=original_run;sys.argv=saved_argv
-print('PASS: native modes, fractional scale, offsets, unequal physical sizes, continuous seams, rotation, stacking, disabled outputs, EDID, calibration, suitability, folder/manifest catalogs, units, idempotent apply')
+print('PASS: native modes, fractional scale, offsets, unequal physical sizes, continuous seams, rotation, stacking, disabled outputs, EDID, calibration, suitability, folder/manifest catalogs, units, idempotent apply, stepwise hotplug, multi-layout cache')

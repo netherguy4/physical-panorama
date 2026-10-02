@@ -257,12 +257,18 @@ def prepare(rows,layout,settings,fast=False):
         for row in rows: one(row)
 
 
-def prune(rows,layout,settings):
+def prune(rows,layout,settings,keep_days=30):
     protected={generation_path(r,layout,settings) for r in rows if framing(r,layout,settings)['valid']}
+    for path in protected:
+        if path.exists(): os.utime(path)
     current=(STATE/'current').resolve() if (STATE/'current').is_symlink() else None
-    # ponytail: keeps one layout's cache only; keep several layouts if docking toggles cause rebuilds.
+    cutoff=time.time()-keep_days*86400
+    # Other layouts (docked/undocked, lid closed) keep their cache until unused for keep_days.
     for old in (STATE/'generations').iterdir():
-        if old.is_dir() and old not in protected and old!=current: shutil.rmtree(old)
+        if not old.is_dir() or old in protected or old==current: continue
+        try: same=json.loads((old/'geometry.json').read_text())['layout']==layout
+        except (OSError,ValueError,KeyError): same=True
+        if same or old.stat().st_mtime<cutoff: shutil.rmtree(old)
 
 
 def apply(layout,generation):
@@ -283,6 +289,7 @@ def apply(layout,generation):
     if link.is_symlink(): link.unlink()
     link.symlink_to(generation.resolve(), target_is_directory=True)
     link.replace(current)
+    os.utime(generation)
     for key,value in values.items():
         if key!='backgrounds' and not ((COSMIC/key).is_file() and (COSMIC/key).read_text()==value): atomic(COSMIC/key,value)
     # The symlink publishes the complete generation first; one config event reloads every output together.
@@ -301,7 +308,7 @@ def units():
                         '[Timer]\nOnActiveSec=15s\nOnUnitActiveSec=15min\nAccuracySec=15s\nRandomizedDelaySec=15s\n\n[Install]\nWantedBy=cosmic-session.target\n',
         # No default dependencies: WantedBy plus After on the same target would form an ordering cycle.
         f'{APP}-reload.service': f'[Unit]\nDescription=Re-fit the current panorama to the monitor layout\nDefaultDependencies=no\n{session}\n'
-                                 f'{oneshot}ExecStartPre=/usr/bin/sleep 2\nExecStart={command} reload\n\n[Install]\nWantedBy=cosmic-session.target\n',
+                                 f'{oneshot}ExecStartPre=/usr/bin/sleep 2\nExecStart={command} fit\n\n[Install]\nWantedBy=cosmic-session.target\n',
         # cosmic-comp rewrites outputs.ron whenever monitors are connected or rearranged.
         f'{APP}-layout.path': f'[Unit]\nDescription=Watch the COSMIC monitor layout\nPartOf=cosmic-session.target\n\n'
                               f'[Path]\nPathChanged=%S/cosmic-comp/outputs.ron\nUnit={APP}-reload.service\n\n[Install]\nWantedBy=cosmic-session.target\n',
@@ -323,7 +330,7 @@ def install_units():
 
 def main():
     parser = argparse.ArgumentParser(prog=APP, description=__doc__)
-    parser.add_argument('command',nargs='?',default='next',choices=['next','reload','layout','status','list','render','restore','prepare','static','slideshow'])
+    parser.add_argument('command',nargs='?',default='next',choices=['next','fit','reload','layout','status','list','render','restore','prepare','static','slideshow'])
     parser.add_argument('--id',help='Select an image by catalog ID (see list)')
     parser.add_argument('--group',help='Override the configured group for this run ("all" for every image)')
     parser.add_argument('--destination',type=Path,help='Offline render directory; does not apply')
@@ -356,60 +363,65 @@ def main():
         if args.command=='status':
             print((STATE/'state.json').read_text() if (STATE/'state.json').exists() else 'No panorama applied yet')
             return
-        layout = geometry(settings)
-        if args.command=='layout':
-            print(json.dumps(layout,indent=2)); return
-        rows = catalog(settings)
-        group = args.group or settings.get('group','all')
-        grouped = [r for r in rows if group=='all' or r.get('group','default')==group]
-        eligible = [r for r in grouped if framing(r,layout,settings)['valid']]
-        if args.command=='list':
-            for r in grouped:
-                frame = framing(r,layout,settings)
-                print(f"{'ok ' if frame['valid'] else 'no '} {r['id']}  [{r.get('group','default')}]  keeps {frame['retained']:.0%}, resample {frame['resample']:.2f}x")
-            return
-        unsuitable = (f'No image in group "{group}" fits this layout ({len(rows)} found); '
-                      f'panoramas must be wide and large enough, see "{APP} list"')
-        if args.command=='prepare':
-            if not eligible: raise ValueError(unsuitable)
-            prepare(eligible,layout,settings,fast=args.fast)
-            prune(rows,layout,settings)
-            print(f'Cache ready: {len(eligible)} suitable panoramas'); return
-        state = json.loads((STATE/'state.json').read_text()) if (STATE/'state.json').exists() else {}
-        desired = args.id or (state.get('panorama') if args.command in ('reload','static') else None)
-        row = next((r for r in rows if r['id']==desired and framing(r,layout,settings)['valid']),None)
-        if args.id and row is None: raise ValueError('Requested panorama is unsuitable or unknown')
-        seen = state.get('seen',[])
-        if row is None:
-            if not eligible: raise ValueError(unsuitable)
-            available = [r for r in eligible if r['id'] not in seen]
-            if not available:
-                seen=[]
-                available=[r for r in eligible if r['id']!=state.get('panorama')] or eligible
-            row = random.choice(available)
-        if args.command=='render':
-            if args.destination is None: raise ValueError('render requires --destination')
-            frame=render(row,layout,settings,args.destination)
-            print(json.dumps(dict(panorama=row['id'],framing=frame,destination=str(args.destination)),indent=2)); return
-        generation=generation_path(row,layout,settings)
-        if not ready(generation,layout):
-            if args.command in ('reload','static'): prepare([row],layout,settings)
-            else: raise ValueError(f'Cache missing; run "{APP} prepare" first')
-        changed = apply(layout,generation)
-        if row['id'] not in seen: seen.append(row['id'])
-        atomic(STATE/'state.json',json.dumps(dict(panorama=row['id'],title=row['title'],updated=time.time(),
-            eligible=len(eligible),collection=len(rows),seen=seen,layout=layout,generation=str(generation)),indent=2))
-        verb = 'Applied' if changed else 'Already showing'
-        print(f"{verb} {row['id']} on {', '.join(o['name'] for o in layout['outputs'])}; {len(eligible)} suitable panoramas",flush=True)
-        if args.command=='static':
-            systemctl('enable',f'{APP}-reload.service')
-            systemctl('enable','--now',f'{APP}-layout.path')
-            print('Static mode: this panorama is re-fitted after login and on monitor changes')
-        if args.command=='reload':
-            remaining=[r for r in rows if r['id']!=row['id'] and framing(r,layout,settings)['valid'] and (not args.group or args.group=='all' or r.get('group','default')==args.group)]
-            prepare(remaining,layout,settings,fast=args.fast)
-            prune(rows,layout,settings)
-            print('Current panorama applied first; remaining cache ready')
+        # Hotplug happens in steps (one output, then the rest); re-fit until the layout stops changing.
+        for _ in range(10):
+            layout = geometry(settings)
+            if args.command=='layout':
+                print(json.dumps(layout,indent=2)); return
+            rows = catalog(settings)
+            group = args.group or settings.get('group','all')
+            grouped = [r for r in rows if group=='all' or r.get('group','default')==group]
+            eligible = [r for r in grouped if framing(r,layout,settings)['valid']]
+            if args.command=='list':
+                for r in grouped:
+                    frame = framing(r,layout,settings)
+                    print(f"{'ok ' if frame['valid'] else 'no '} {r['id']}  [{r.get('group','default')}]  keeps {frame['retained']:.0%}, resample {frame['resample']:.2f}x")
+                return
+            unsuitable = (f'No image in group "{group}" fits this layout ({len(rows)} found); '
+                          f'panoramas must be wide and large enough, see "{APP} list"')
+            if args.command=='prepare':
+                if not eligible: raise ValueError(unsuitable)
+                prepare(eligible,layout,settings,fast=args.fast)
+                prune(rows,layout,settings)
+                print(f'Cache ready: {len(eligible)} suitable panoramas'); return
+            state = json.loads((STATE/'state.json').read_text()) if (STATE/'state.json').exists() else {}
+            desired = args.id or (state.get('panorama') if args.command in ('fit','reload','static') else None)
+            row = next((r for r in rows if r['id']==desired and framing(r,layout,settings)['valid']),None)
+            if args.id and row is None: raise ValueError('Requested panorama is unsuitable or unknown')
+            seen = state.get('seen',[])
+            if row is None:
+                if not eligible: raise ValueError(unsuitable)
+                available = [r for r in eligible if r['id'] not in seen]
+                if not available:
+                    seen=[]
+                    available=[r for r in eligible if r['id']!=state.get('panorama')] or eligible
+                row = random.choice(available)
+            if args.command=='render':
+                if args.destination is None: raise ValueError('render requires --destination')
+                frame=render(row,layout,settings,args.destination)
+                print(json.dumps(dict(panorama=row['id'],framing=frame,destination=str(args.destination)),indent=2)); return
+            generation=generation_path(row,layout,settings)
+            if not ready(generation,layout):
+                if args.command in ('fit','reload','static'): prepare([row],layout,settings)
+                else: raise ValueError(f'Cache missing; run "{APP} prepare" first')
+            changed = apply(layout,generation)
+            if row['id'] not in seen: seen.append(row['id'])
+            atomic(STATE/'state.json',json.dumps(dict(panorama=row['id'],title=row['title'],updated=time.time(),
+                eligible=len(eligible),collection=len(rows),seen=seen,layout=layout,generation=str(generation)),indent=2))
+            verb = 'Applied' if changed else 'Already showing'
+            print(f"{verb} {row['id']} on {', '.join(o['name'] for o in layout['outputs'])}; {len(eligible)} suitable panoramas",flush=True)
+            if args.command=='static':
+                systemctl('enable',f'{APP}-reload.service')
+                systemctl('enable','--now',f'{APP}-layout.path')
+                print('Static mode: this panorama is re-fitted after login and on monitor changes')
+            if args.command=='reload':
+                remaining=[r for r in rows if r['id']!=row['id'] and framing(r,layout,settings)['valid'] and (not args.group or args.group=='all' or r.get('group','default')==args.group)]
+                prepare(remaining,layout,settings,fast=args.fast)
+                prune(rows,layout,settings)
+                print('Current panorama applied first; remaining cache ready')
+            if args.command!='fit': break
+            time.sleep(2)
+            if geometry(settings)==layout: break
 
 
 def cli():

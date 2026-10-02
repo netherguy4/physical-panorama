@@ -49,6 +49,7 @@ physical-panorama static                # show a panorama permanently (keeps the
 physical-panorama static --id space/m42 # show a specific image (ID = path without extension)
 physical-panorama slideshow             # random panorama every ~15 minutes
 physical-panorama next                  # switch now (cache must be prepared)
+physical-panorama fit                   # re-fit the current image to the live layout (what the units run)
 physical-panorama prepare               # pre-render crops for all fitting images
 physical-panorama reload --fast         # re-fit the current image, then prepare the rest in parallel
 physical-panorama layout                # print the detected physical layout
@@ -63,8 +64,10 @@ physical-panorama restore               # disable automation, restore the previo
 | Unit | Purpose |
 | --- | --- |
 | `physical-panorama.timer` / `.service` | slideshow: prepare cache, then switch |
-| `physical-panorama-reload.service` | static mode: re-fit after login |
-| `physical-panorama-layout.path` | both modes: re-fit when `~/.local/state/cosmic-comp/outputs.ron` changes (monitor hotplug or rearrangement) |
+| `physical-panorama-reload.service` | runs `fit`; enabled at login in static mode |
+| `physical-panorama-layout.path` | both modes: starts the reload service when `~/.local/state/cosmic-comp/outputs.ron` changes (monitor hotplug or rearrangement) |
+
+Reconnecting monitors changes the layout in several steps. `fit` renders only the current image and keeps re-reading the layout until it is stable for two seconds, so it ends on the final arrangement rather than an intermediate one.
 
 The units start the same Python interpreter and script that ran the command, so re-run `static` or `slideshow` after moving the install.
 
@@ -113,7 +116,7 @@ If the image folder contains `manifest.json`, it is used instead of scanning. Us
 2. Outputs are placed in millimetres, starting from the primary one, attaching each neighbour along the shared edge.
 3. The image is scaled to cover the physical canvas. Every monitor's crop box is computed in floating-point source coordinates and resampled with Lanczos straight to the monitor's native pixels, so no rounding drift accumulates at seams.
 4. Crops are cached in `~/.local/state/physical-panorama/generations/`, keyed by layout, image and framing. A complete generation is published through one atomic symlink, then a single COSMIC `backgrounds` config write reloads all outputs. COSMIC has no frame-atomic multi-output transaction, so monitors with different refresh rates may switch a frame apart.
-5. Unchanged layouts reuse the cache. A new layout re-renders the current image first, then the rest at low CPU and I/O priority. Only the current layout's cache is kept.
+5. Unchanged layouts reuse the cache. A new layout re-renders the current image first; `reload`, `prepare` and the slideshow prepare the rest at low CPU and I/O priority. Caches of other layouts (docked, undocked, lid closed) are kept until unused for 30 days.
 
 ## Other desktops
 
