@@ -1,0 +1,118 @@
+output "HDMI-A-1" enabled=#true {
+  description make="Example" model="Monitor"
+  physical 540 310
+  position 0 230
+  scale 1.00
+  transform "normal"
+  adaptive_sync_support "requires_modeset"
+  adaptive_sync #false
+  xwayland_primary #false
+  serial_number "000000000000"
+  modes {
+    mode 1920 1080 120000 current=#true
+    mode 1920 1080 119997
+    mode 1920 1080 119880
+    mode 1920 1080 100000
+    mode 1920 1080 74973
+    mode 1920 1080 60000 preferred=#true
+    mode 1920 1080 59940
+    mode 1920 1080 50000
+    mode 1680 1050 59883
+    mode 1440 900 59901
+    mode 1280 1024 75025
+    mode 1280 1024 60020
+    mode 1280 960 60000
+    mode 1280 800 59910
+    mode 1280 720 60000
+    mode 1280 720 59940
+    mode 1280 720 50000
+    mode 1152 864 75000
+    mode 1024 768 75029
+    mode 1024 768 70069
+    mode 1024 768 60004
+    mode 832 624 74551
+    mode 800 600 75000
+    mode 800 600 72188
+    mode 800 600 60317
+    mode 800 600 56250
+    mode 720 576 50000
+    mode 720 480 60000
+    mode 720 480 59940
+    mode 720 400 70082
+    mode 640 480 75000
+    mode 640 480 72809
+    mode 640 480 66667
+    mode 640 480 60000
+    mode 640 480 59940
+  }
+}
+output "DP-1" enabled=#true {
+  description make="Example" model="Monitor"
+  physical 600 340
+  position 1920 0
+  scale 1.50
+  transform "normal"
+  adaptive_sync_support #true
+  adaptive_sync #false
+  xwayland_primary #true
+  serial_number "000000000000"
+  modes {
+    mode 3840 2160 59997 current=#true preferred=#true
+    mode 3840 2160 30000
+    mode 3840 2160 29970
+    mode 3840 2160 25000
+    mode 3840 2160 24000
+    mode 3840 2160 23976
+    mode 2560 1440 59951
+    mode 2048 1280 59993
+    mode 1920 2160 59988
+    mode 1920 1080 60000
+    mode 1920 1080 59940
+    mode 1920 1080 50000
+    mode 1920 1080 25000
+    mode 1920 1080 24000
+    mode 1920 1080 23976
+    mode 1600 1200 60000
+    mode 1600 900 60000
+    mode 1280 1024 75025
+    mode 1280 1024 60020
+    mode 1280 720 60000
+    mode 1280 720 59940
+    mode 1280 720 50000
+    mode 1152 864 75000
+    mode 1024 768 75029
+    mode 1024 768 60004
+    mode 800 600 75000
+    mode 800 600 60317
+    mode 720 576 50000
+    mode 720 480 60000
+    mode 720 480 59940
+    mode 720 400 70082
+    mode 640 480 75000
+    mode 640 480 60000
+    mode 640 480 59940
+  }
+}
+output "eDP-1" enabled=#true {
+  description make="Example" model="Monitor"
+  physical 300 190
+  position 4480 480
+  scale 1.25
+  transform "normal"
+  adaptive_sync_support #false
+  adaptive_sync #false
+  xwayland_primary #false
+  modes {
+    mode 1920 1200 59999 current=#true preferred=#true
+    mode 1920 1080 59999
+    mode 1680 1050 59999
+    mode 1600 1200 59999
+    mode 1440 900 59999
+    mode 1280 1024 59999
+    mode 1280 800 59999
+    mode 1280 720 59999
+    mode 1024 768 59999
+    mode 800 600 59999
+    mode 640 480 59999
+  }
+}
