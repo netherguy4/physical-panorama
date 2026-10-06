@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-06T19:25:17.853413+00:00",
+  "title": "Design System: Physical Panorama COSMIC Applet",
+  "extensions": {
+    "typographyMeta": {
+      "title": {
+        "displayName": "COSMIC Title 4",
+        "purpose": "Panorama title and loading title; configured interface font."
+      },
+      "caption": {
+        "displayName": "COSMIC Caption",
+        "purpose": "Collection/count, mode and busy guidance; configured interface font."
+      },
+      "button-label": {
+        "displayName": "COSMIC Standard Button Label",
+        "purpose": "Transport and retry actions; configured interface font."
+      }
+    },
+    "nativePlatform": {
+      "library": "libcosmic",
+      "revision": "d4d71fd53e5ed6bd3a430089114dffa2da3cd498",
+      "source": "src/main.rs",
+      "themeAuthority": "Runtime COSMIC background, on-background, divider, button and accent focus roles; configured interface font and corner radii.",
+      "previewLimit": "Native Rust/iced components have no faithful standalone HTML/CSS implementation; web previews and synthesized tonal ramps are omitted.",
+      "verification": "Headless 2x light/dark content fixtures: normal, busy-long-title, error, empty, loading. Installed upper-panel process and icon verified live. Popup opening, keyboard/focus interactions and separate Wayland dropdown surfaces unverified: mixed-scale input cannot reliably target layer-shell surfaces."
+    }
+  },
+  "components": [
+    {
+      "name": "Transport and Retry",
+      "kind": "button",
+      "description": "Native widget::button::standard with theme hover/focus/disabled states; transport includes symbolic leading icons."
+    },
+    {
+      "name": "Collection and Interval",
+      "kind": "input",
+      "description": "Native widget::dropdown::popup_dropdown inside settings items; collection counts and selected configured interval remain visible."
+    },
+    {
+      "name": "Panel Popup",
+      "kind": "custom",
+      "description": "Native applet icon_button and popup_container; status stack precedes transport, settings and contextual feedback."
+    }
+  ],
+  "narrative": {
+    "northStar": "Native COSMIC panel control",
+    "overview": "A native COSMIC panel control for physical-panorama. Compact status and controls follow the installed desktop theme and interface font; this applet adds no independent brand palette or display face.",
+    "keyCharacteristics": [
+      "Native theme and symbolic icons.",
+      "Status first, transport second, configuration below.",
+      "Explicit busy, empty, loading and retry states."
+    ],
+    "rules": [
+      {
+        "name": "The Native Authority Rule",
+        "body": "Theme roles stay live; screenshot colors are evidence of a fixture, not fixed app tokens.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "Do retain native hover, focus and disabled states.",
+      "Do keep group and interval choices independent when queued.",
+      "Do preserve action errors across automatic status refreshes until retry or another action."
+    ],
+    "donts": [
+      "Don't freeze theme colors, fonts or corner radii into app-specific replacements.",
+      "Don't treat headless fixtures as proof of live panel or dropdown-surface integration."
+    ]
+  }
+}

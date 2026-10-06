@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Run with python3 tests/test_panorama.py; isolated temporary state, no desktop changes."""
 import copy
+import contextlib
+import fcntl
+import io
 import json
 import os
 import shutil
@@ -78,8 +81,13 @@ assert byname['eDP-1']['physical_position'][0]-byname['DP-1']['physical_position
 with tempfile.TemporaryDirectory() as temporary:
  root=Path(temporary)
  panorama.STATE=root/'state';panorama.STATE.mkdir()
+ panorama.CONFIG_HOME=root/'xdg-config'
  panorama.COSMIC=root/'config';panorama.COSMIC.mkdir()
  panorama.UNITS=root/'units'
+ gallery=panorama.CONFIG_HOME/'cosmic/com.system76.CosmicSettings.Wallpaper/v1/custom-images'
+ gallery.parent.mkdir(parents=True)
+ custom=str(root/'Обои, ] "quoted" \\image.jpg')
+ gallery.write_text('[\n    '+json.dumps(custom,ensure_ascii=False)+',\n]\n')
  (panorama.COSMIC/'all').write_text('original wallpaper')
  for name in ('first','second'):
   generation=root/name;generation.mkdir()
@@ -87,9 +95,39 @@ with tempfile.TemporaryDirectory() as temporary:
   assert panorama.apply(layout,generation)
   assert all((panorama.STATE/'current'/(o['name']+'.jpg')).read_text()==name for o in layout['outputs'])
   assert (panorama.COSMIC/'same-on-all').read_text().strip()=='false'
+  registered=json.loads(gallery.read_text())
+  assert registered==[custom]+[str(panorama.STATE/'current'/(o['name']+'.jpg')) for o in layout['outputs']]
+  assert all(Path(image).is_file() for image in registered[1:])
  assert (panorama.STATE/'backup/all').read_text()=='original wallpaper'
  # Re-applying an unchanged generation must not trigger another COSMIC reload.
  assert not panorama.apply(layout,generation)
+ # Settings uses native RON formatting and may reorder the same connector set.
+ native='[\n'+''.join('    '+json.dumps(o['name'])+',\n' for o in reversed(layout['outputs']))+']\n'
+ (panorama.COSMIC/'backgrounds').write_text(native)
+ for output in layout['outputs']:
+  entry=panorama.COSMIC/('output.'+output['name'])
+  entry.write_text(entry.read_text().rstrip())
+ assert 'scaling_mode: Zoom,' in (panorama.COSMIC/'output.DP-1').read_text()
+ assert not panorama.apply(layout,generation)
+ assert (panorama.COSMIC/'backgrounds').read_text()==native
+ before=(panorama.COSMIC/'backgrounds').stat().st_mtime_ns
+ gallery.write_text('[]')
+ assert not panorama.apply(layout,generation)
+ assert (panorama.COSMIC/'backgrounds').stat().st_mtime_ns==before
+ assert json.loads(gallery.read_text())==registered[1:]
+ # Native RON escaping must survive a round trip without changing unrelated image paths.
+ gallery.write_text(r'''["/pictures/it\'s.jpg", "/pictures/\u{202e}space.jpg", "/pictures/literal\\u{41}.jpg", "/pictures/\u{8}control.jpg",]''')
+ assert not panorama.apply(layout,generation)
+ normalized=gallery.read_text()
+ assert "it's.jpg" in normalized and '\u202espace.jpg' in normalized
+ assert r'literal\\u{41}.jpg' in normalized and r'\u{8}control.jpg' in normalized
+ assert panorama.gallery_update([o['name'] for o in layout['outputs']]) is None
+ gallery.write_text('not a path list')
+ try: panorama.apply(layout,generation);raise AssertionError('invalid gallery accepted')
+ except ValueError: pass
+ assert gallery.read_text()=='not a path list'
+ assert (panorama.COSMIC/'backgrounds').stat().st_mtime_ns==before
+ gallery.write_text(json.dumps(registered,ensure_ascii=False))
  (panorama.COSMIC/'output.DP-1').write_text('changed in Settings')
  assert panorama.apply(layout,generation)
  small_layout=dict(canvas_mm=[100,50],outputs=[dict(name='test',pixels=[100,50],mm=[100,50],physical_position=[0,0])])
@@ -171,6 +209,14 @@ with tempfile.TemporaryDirectory() as temporary:
  panorama.time.sleep=saved_sleep;panorama.geometry=lambda settings:small_layout
  assert [e[:2] for e in events]==[('apply','current'),('render','current'),('apply','current')]
  assert json.loads((panorama.STATE/'state.json').read_text())['layout']==changed_layout
+ # fit crops the shown image even to a layout it is unsuitable for, instead of swapping it.
+ original_framing=panorama.framing
+ panorama.framing=lambda row,layout,settings:dict(original_framing(row,layout,settings),valid=row['id']!='current')
+ panorama.time.sleep=lambda seconds:None
+ panorama.geometry=lambda settings:small_layout
+ sys.argv=['panorama','fit'];panorama.main()
+ assert json.loads((panorama.STATE/'state.json').read_text())['panorama']=='current'
+ panorama.framing=original_framing;panorama.time.sleep=saved_sleep
  # Other layouts' caches survive until unused for keep_days; incomplete ones go immediately.
  generations=panorama.STATE/'generations'
  for name in ('recent-layout','stale-layout'):
@@ -195,5 +241,80 @@ with tempfile.TemporaryDirectory() as temporary:
  events.clear();sys.argv=['panorama','slideshow'];panorama.main()
  # Units are unchanged, so no daemon-reload.
  assert events==[('systemctl',['disable','physical-panorama-reload.service']),('systemctl',['enable','--now','physical-panorama.timer','physical-panorama-layout.path'])]
+ events.clear()
+ added=str(root/'added-later.jpg')
+ gallery.write_text(json.dumps(json.loads(gallery.read_text())+[added],ensure_ascii=False))
+ sys.argv=['panorama','restore'];panorama.main()
+ assert json.loads(gallery.read_text())==[custom,added]
+ assert (panorama.COSMIC/'all').read_text()=='original wallpaper'
+ # Applet operations use isolated files and systemctl replies, never the live session.
+ running=[False]
+ def systemctl_reply(command,**kwargs):
+  events.append(('systemctl',command[2:]))
+  return panorama.subprocess.CompletedProcess(command,0 if command[2]!='is-active' or running[0] else 3)
+ panorama.subprocess.run=systemctl_reply
+ def call(*arguments):
+  sys.argv=['panorama',*arguments]
+  with contextlib.redirect_stdout(io.StringIO()) as captured: panorama.main()
+  return captured.getvalue()
+ with (panorama.STATE/'lock').open('w') as held:
+  fcntl.flock(held,fcntl.LOCK_EX)
+  status=json.loads(call('status','--json'))
+ assert not status['active'] and not status['slideshow'] and status['interval']==15
+ assert status['group']=='abstract' and status['eligible']==2
+ assert {group['id']:group['count'] for group in status['groups']}=={'all':3,'abstract':2,'additional':1}
+ settings=json.loads(panorama.CONFIG.read_text());settings['custom']={'preserve':True}
+ panorama.CONFIG.write_text(json.dumps(settings))
+ before=panorama.CONFIG.read_text()
+ for group in ('typo',''):
+  try: call('configure','--group',group);raise AssertionError('unknown group accepted')
+  except ValueError: pass
+  assert panorama.CONFIG.read_text()==before
+ call('configure','--group','all','--interval','30')
+ assert json.loads(panorama.CONFIG.read_text())['custom']=={'preserve':True}
+ assert 'OnUnitActiveSec=30min' in (panorama.UNITS/'physical-panorama.timer').read_text()
+ assert json.loads(call('status','--json'))['active']
+ call('next','--id','other1');call('next','--id','other2')
+ assert json.loads(call('status','--json'))['can_previous']
+ call('previous')
+ assert json.loads((panorama.STATE/'state.json').read_text())['panorama']=='other1'
+ # Missing/deleted historical IDs are skipped; previous never re-appends the popped entry.
+ state=json.loads((panorama.STATE/'state.json').read_text())
+ state['history']=['current','deleted','other1'];(panorama.STATE/'state.json').write_text(json.dumps(state))
+ call('previous')
+ state=json.loads((panorama.STATE/'state.json').read_text())
+ assert state['panorama']=='current' and state['history']==['current']
+ assert not json.loads(call('status','--json'))['can_previous']
+ try: call('previous');raise AssertionError('empty history accepted')
+ except ValueError: pass
+ shutil.rmtree(panorama.generation_path(rows[1],small_layout,{}))
+ call('next','--id','other1')
+ assert panorama.ready(panorama.generation_path(rows[1],small_layout,{}),small_layout)
+ running[0]=True;events.clear()
+ call('configure','--interval','60')
+ assert ('systemctl',['restart','physical-panorama.timer']) in events
+ assert 'OnActiveSec=60min' in (panorama.UNITS/'physical-panorama.timer').read_text()
+ assert json.loads(call('status','--json'))['slideshow']
+ events.clear();call('slideshow','--interval','5')
+ assert ('systemctl',['restart','physical-panorama.timer']) in events
+ assert 'OnUnitActiveSec=5min' in (panorama.UNITS/'physical-panorama.timer').read_text()
+ events.clear();call('slideshow','--interval','5')
+ assert ('systemctl',['restart','physical-panorama.timer']) not in events
+ # A timer restart may fire from the service's old timestamp: the scheduled command must skip it.
+ before=(panorama.STATE/'state.json').read_text()
+ assert 'keeping the current panorama' in call('next','--scheduled')
+ assert (panorama.STATE/'state.json').read_text()==before
+ saved_time=panorama.time.time
+ latest=max(json.loads(before)['updated'],panorama.CONFIG.stat().st_mtime)
+ panorama.time.time=lambda:latest+5*60+1
+ call('next','--scheduled')
+ assert (panorama.STATE/'state.json').read_text()!=before
+ panorama.time.time=saved_time
+ for interval in ('0','1441','oops'):
+  before=panorama.CONFIG.read_text()
+  with contextlib.redirect_stderr(io.StringIO()):
+   try: call('configure','--interval',interval);raise AssertionError('invalid interval accepted')
+   except SystemExit as error: assert error.code==2
+  assert panorama.CONFIG.read_text()==before
  panorama.subprocess.run=original_run;sys.argv=saved_argv
-print('PASS: native modes, fractional scale, offsets, unequal physical sizes, continuous seams, rotation, stacking, disabled outputs, EDID, calibration, suitability, folder/manifest catalogs, units, idempotent apply, stepwise hotplug, multi-layout cache')
+print('PASS: native modes, fractional scale, offsets, unequal physical sizes, continuous seams, rotation, stacking, disabled outputs, EDID, calibration, suitability, folder/manifest catalogs, units, idempotent apply, gallery registration/restore, native RON escapes, stepwise hotplug, multi-layout cache')

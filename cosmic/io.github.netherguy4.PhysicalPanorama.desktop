@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Physical Panorama
+Name[ru]=Физическая панорама
+Comment=Switch panoramic wallpapers across monitors
+Comment[ru]=Переключение панорамных обоев на мониторах
+Exec=physical-panorama-cosmic
+Icon=preferences-desktop-wallpaper-symbolic
+NoDisplay=true
+X-CosmicApplet=true

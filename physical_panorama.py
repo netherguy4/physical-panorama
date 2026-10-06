@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Span one panorama across several monitors at true physical scale (COSMIC). No resident process."""
 import argparse
+import ast
 import fcntl
 import hashlib
 import json
@@ -207,7 +208,6 @@ def source_box(output, frame):
 def render(row,layout,settings,destination):
     destination.mkdir(parents=True,exist_ok=True)
     frame = framing(row,layout,settings)
-    if not frame['valid']: raise ValueError('Panorama is unsuitable for current layout')
     with Image.open(row['path']) as image:
         if image.size != (row['width'],row['height']): raise ValueError(f"{row['file']}: dimensions differ from catalog")
         if image.mode != 'RGB':
@@ -271,16 +271,48 @@ def prune(rows,layout,settings,keep_days=30):
         if same or old.stat().st_mtime<cutoff: shutil.rmtree(old)
 
 
+def gallery_update(names):
+    path = CONFIG_HOME/'cosmic/com.system76.CosmicSettings.Wallpaper/v1/custom-images'
+    text = path.read_text() if path.exists() else '[]'
+    # Native RON string lists allow trailing commas, escaped apostrophes and Rust Unicode escapes.
+    text = re.sub(r'\\(?:\\|u\{([0-9a-fA-F]+)\})',
+                  lambda m: '\\U'+f'{int(m[1],16):08x}' if m[1] else m[0], text)
+    try: images = ast.literal_eval(text)
+    except (SyntaxError,ValueError) as error:
+        raise ValueError(f'Cannot read {path}; custom images left unchanged') from error
+    if not isinstance(images,list) or not all(isinstance(image,str) for image in images):
+        raise ValueError(f'Expected an image-path list in {path}; custom images left unchanged')
+    current = STATE/'current'
+    updated = [image for image in images if Path(image).parent!=current or Path(image).suffix!='.jpg']
+    updated.extend(str(current/(name+'.jpg')) for name in names)
+    if updated==images: return None
+    text = json.dumps(updated,ensure_ascii=False,indent=4)+'\n'
+    text = re.sub(r'\\(?:\\|([bf])|u([0-9a-fA-F]{4}))',
+                  lambda m: '\\u{'+(m[2] or ('8' if m[1]=='b' else 'c'))+'}' if m[1] or m[2] else m[0], text)
+    return path,text
+
+
 def apply(layout,generation):
     names = [o['name'] for o in layout['outputs']]
-    values = {('output.'+name): (f'(output: {json.dumps(name)}, source: Path({json.dumps(str(STATE/"current"/(name+".jpg")),ensure_ascii=False)}), '
-              'filter_by_theme: false, rotation_frequency: 0, filter_method: Lanczos, '
-              'scaling_mode: Stretch, sampling_method: Alphanumeric)\n') for name in names}
+    gallery = gallery_update(names)
+    # Native-size crops need no scaling; Zoom and native formatting survive Settings' normalization.
+    values = {('output.'+name): (f'(\n    output: {json.dumps(name)},\n'
+              f'    source: Path({json.dumps(str(STATE/"current"/(name+".jpg")),ensure_ascii=False)}),\n'
+              '    filter_by_theme: false,\n    rotation_frequency: 0,\n    filter_method: Lanczos,\n'
+              '    scaling_mode: Zoom,\n    sampling_method: Alphanumeric,\n)\n') for name in names}
     values['same-on-all'] = 'false\n'
     values['backgrounds'] = json.dumps(names)+'\n'
+    backgrounds = COSMIC/'backgrounds'
+    if backgrounds.is_file():
+        text = backgrounds.read_text()
+        try: existing = ast.literal_eval(text)
+        except (SyntaxError,ValueError): existing = None
+        if isinstance(existing,list) and all(isinstance(name,str) for name in existing) and len(existing)==len(names) and set(existing)==set(names):
+            values['backgrounds'] = text
     current = STATE/'current'
     if current.is_symlink() and current.resolve()==generation.resolve() and all(
-            (COSMIC/key).is_file() and (COSMIC/key).read_text()==value for key,value in values.items()):
+            (COSMIC/key).is_file() and (COSMIC/key).read_text().strip()==value.strip() for key,value in values.items()):
+        if gallery is not None: atomic(*gallery)
         return False
     COSMIC.mkdir(parents=True,exist_ok=True)
     if not (STATE/'backup').exists():
@@ -290,22 +322,26 @@ def apply(layout,generation):
     link.symlink_to(generation.resolve(), target_is_directory=True)
     link.replace(current)
     os.utime(generation)
+    # Settings reapplies its selection on entry; every crop must be discoverable in its gallery.
+    if gallery is not None: atomic(*gallery)
     for key,value in values.items():
-        if key!='backgrounds' and not ((COSMIC/key).is_file() and (COSMIC/key).read_text()==value): atomic(COSMIC/key,value)
+        if key!='backgrounds' and not ((COSMIC/key).is_file() and (COSMIC/key).read_text().strip()==value.strip()): atomic(COSMIC/key,value)
     # The symlink publishes the complete generation first; one config event reloads every output together.
     atomic(COSMIC/'backgrounds',values['backgrounds'])
     return True
 
 
-def units():
+def units(settings=None):
+    interval = (settings or {}).get('interval',15)
     command = ' '.join('"'+str(part).replace('%','%%')+'"' for part in (sys.executable, Path(__file__).resolve()))
     session = 'After=cosmic-session.target\nPartOf=cosmic-session.target\n'
     oneshot = '[Service]\nType=oneshot\nNice=15\nIOSchedulingClass=idle\nTimeoutStartSec=900\n'
     return {
         f'{APP}.service': f'[Unit]\nDescription=Switch to a random panorama\n{session}\n{oneshot}'
-                          f'ExecStartPre={command} prepare\nExecStart={command} next\n',
+                          f'ExecStartPre={command} prepare\nExecStart={command} next --scheduled\n',
+        # Interval edits restart the timer; use the full interval for its first trigger too.
         f'{APP}.timer': '[Unit]\nDescription=Panorama slideshow\nPartOf=cosmic-session.target\n\n'
-                        '[Timer]\nOnActiveSec=15s\nOnUnitActiveSec=15min\nAccuracySec=15s\nRandomizedDelaySec=15s\n\n[Install]\nWantedBy=cosmic-session.target\n',
+                        f'[Timer]\nOnActiveSec={interval}min\nOnUnitActiveSec={interval}min\nAccuracySec=15s\nRandomizedDelaySec=15s\n\n[Install]\nWantedBy=cosmic-session.target\n',
         # No default dependencies: WantedBy plus After on the same target would form an ordering cycle.
         f'{APP}-reload.service': f'[Unit]\nDescription=Re-fit the current panorama to the monitor layout\nDefaultDependencies=no\n{session}\n'
                                  f'{oneshot}ExecStartPre=/usr/bin/sleep 2\nExecStart={command} fit\n\n[Install]\nWantedBy=cosmic-session.target\n',
@@ -319,31 +355,81 @@ def systemctl(*args):
     subprocess.run(['systemctl','--user',*args],check=True,timeout=15)
 
 
-def install_units():
+def install_units(settings=None):
     changed = False
-    for name,text in units().items():
+    for name,text in units(settings).items():
         path = UNITS/name
         if not path.exists() or path.read_text()!=text:
             atomic(path,text); changed = True
     if changed: systemctl('daemon-reload')
 
 
+def timer_active():
+    return subprocess.run(['systemctl','--user','is-active','--quiet',f'{APP}.timer'],
+                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=3).returncode==0
+
+
+def save_settings(settings):
+    previous = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+    running = settings.get('interval',15)!=previous.get('interval',15) and timer_active()
+    atomic(CONFIG,json.dumps(settings,indent=2)+'\n')
+    if (UNITS/f'{APP}.timer').exists():
+        install_units(settings)
+        if running: systemctl('restart',f'{APP}.timer')
+
+
+def history_for(state):
+    history = state.get('history',[])[:]
+    current = state.get('panorama')
+    if current and (not history or history[-1]!=current): history.append(current)
+    return history
+
+
+def applet_status(settings):
+    state = json.loads((STATE/'state.json').read_text()) if (STATE/'state.json').exists() else {}
+    layout = state.get('layout') or geometry(settings)
+    rows = catalog(settings)
+    eligible = [row for row in rows if framing(row,layout,settings)['valid']]
+    groups = ['all']+sorted({row.get('group','default') for row in rows}-{'all'})
+    group = settings.get('group','all')
+    selected = {row['id'] for row in eligible if group=='all' or row.get('group','default')==group}
+    outputs = layout['outputs']
+    active = bool(outputs) and (STATE/'current').is_symlink() and all(
+        (COSMIC/('output.'+output['name'])).is_file() and
+        json.dumps(str(STATE/'current'/(output['name']+'.jpg')),ensure_ascii=False) in
+        (COSMIC/('output.'+output['name'])).read_text() for output in outputs)
+    return dict(panorama=state.get('panorama'),title=state.get('title'),active=active,
+                slideshow=timer_active(),interval=settings.get('interval',15),group=group,
+                groups=[dict(id=name,count=sum(name=='all' or row.get('group','default')==name for row in eligible)) for name in groups],
+                eligible=len(selected),can_previous=any(item in selected and item!=state.get('panorama') for item in history_for(state)[:-1]))
+
+
 def main():
     parser = argparse.ArgumentParser(prog=APP, description=__doc__)
-    parser.add_argument('command',nargs='?',default='next',choices=['next','fit','reload','layout','status','list','render','restore','prepare','static','slideshow'])
+    parser.add_argument('command',nargs='?',default='next',choices=['next','previous','configure','fit','reload','layout','status','list','render','restore','prepare','static','slideshow'])
     parser.add_argument('--id',help='Select an image by catalog ID (see list)')
     parser.add_argument('--group',help='Override the configured group for this run ("all" for every image)')
     parser.add_argument('--destination',type=Path,help='Offline render directory; does not apply')
     parser.add_argument('--fast',action='store_true',help='Prepare cache in up to four memory-limited worker threads')
+    parser.add_argument('--json',action='store_true',help='Machine-readable applet status')
+    parser.add_argument('--interval',type=int,help='Slideshow interval in minutes (1–1440), saved to configuration')
+    parser.add_argument('--scheduled',action='store_true',help='Timer invocation: skip changes before the configured interval')
     args = parser.parse_args()
     if args.fast and args.command not in ('reload','prepare'): parser.error('--fast requires reload or prepare')
+    if args.json and args.command!='status': parser.error('--json requires status')
+    if args.scheduled and args.command!='next': parser.error('--scheduled requires next')
+    if args.interval is not None and (args.command not in ('configure','slideshow') or not 1<=args.interval<=1440):
+        parser.error('--interval requires configure or slideshow and a value from 1 to 1440')
+    if args.command=='configure' and args.group is None and args.interval is None:
+        parser.error('configure requires --group or --interval')
     settings = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+    if args.command=='status':
+        # State is atomically replaced; taking the render lock here would freeze the applet during preparation.
+        print(json.dumps(applet_status(settings),ensure_ascii=False) if args.json else
+              (STATE/'state.json').read_text() if (STATE/'state.json').exists() else 'No panorama applied yet')
+        return
     STATE.mkdir(parents=True,exist_ok=True)
-    if args.command in ('slideshow','static'): install_units()
-    if args.command=='slideshow':
-        systemctl('disable',f'{APP}-reload.service')
-        systemctl('enable','--now',f'{APP}.timer',f'{APP}-layout.path')
-        print('Slideshow enabled: random panorama approximately every 15 minutes'); return
+    if args.command=='static': install_units(settings)
     if args.command in ('restore','static'):
         if (UNITS/f'{APP}.timer').exists():
             systemctl('disable','--now',f'{APP}.timer',f'{APP}-layout.path')
@@ -351,17 +437,36 @@ def main():
             systemctl('disable',f'{APP}-reload.service')
     with (STATE/'lock').open('w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
+        settings = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+        if args.scheduled:
+            state = json.loads((STATE/'state.json').read_text()) if (STATE/'state.json').exists() else {}
+            # Restarting a timer preserves the service's old activation time and can fire it immediately.
+            latest = max(state.get('updated',0),CONFIG.stat().st_mtime if CONFIG.exists() else 0)
+            if time.time()-latest < settings.get('interval',15)*60:
+                print('Slideshow interval has not elapsed; keeping the current panorama'); return
+        old_interval = settings.get('interval',15)
+        if args.interval is not None: settings['interval']=args.interval
+        if args.command=='slideshow':
+            restart = settings.get('interval',15)!=old_interval and timer_active()
+            if args.interval is not None: atomic(CONFIG,json.dumps(settings,indent=2)+'\n')
+            install_units(settings)
+            systemctl('disable',f'{APP}-reload.service')
+            systemctl('enable','--now',f'{APP}.timer',f'{APP}-layout.path')
+            if restart: systemctl('restart',f'{APP}.timer')
+            print(f"Slideshow enabled: random panorama approximately every {settings.get('interval',15)} minutes"); return
+        if args.command=='configure' and args.group is None:
+            save_settings(settings)
+            print(f"Slideshow interval: {settings['interval']} minutes"); return
         if args.command=='restore':
             if not (STATE/'backup').is_dir(): raise ValueError('No wallpaper backup')
+            gallery = gallery_update([])
             backup_names = {p.name for p in (STATE/'backup').iterdir()}
             for path in COSMIC.iterdir():
                 if (path.name.startswith('output.') or path.name in ('backgrounds','same-on-all')) and path.name not in backup_names:
                     path.unlink()
             for path in (STATE/'backup').iterdir(): atomic(COSMIC/path.name,path.read_text())
+            if gallery is not None: atomic(*gallery)
             print('Automatic changes disabled; previous COSMIC wallpaper configuration restored')
-            return
-        if args.command=='status':
-            print((STATE/'state.json').read_text() if (STATE/'state.json').exists() else 'No panorama applied yet')
             return
         # Hotplug happens in steps (one output, then the rest); re-fit until the layout stops changing.
         for _ in range(10):
@@ -369,7 +474,8 @@ def main():
             if args.command=='layout':
                 print(json.dumps(layout,indent=2)); return
             rows = catalog(settings)
-            group = args.group or settings.get('group','all')
+            group = args.group if args.group is not None else settings.get('group','all')
+            if args.command=='configure': settings['group']=group
             grouped = [r for r in rows if group=='all' or r.get('group','default')==group]
             eligible = [r for r in grouped if framing(r,layout,settings)['valid']]
             if args.command=='list':
@@ -385,13 +491,22 @@ def main():
                 prune(rows,layout,settings)
                 print(f'Cache ready: {len(eligible)} suitable panoramas'); return
             state = json.loads((STATE/'state.json').read_text()) if (STATE/'state.json').exists() else {}
+            history = history_for(state)
             desired = args.id or (state.get('panorama') if args.command in ('fit','reload','static') else None)
-            row = next((r for r in rows if r['id']==desired and framing(r,layout,settings)['valid']),None)
+            if args.command=='previous':
+                available = {row['id'] for row in eligible}
+                history = history[:-1]
+                while history and (history[-1] not in available or history[-1]==state.get('panorama')): history.pop()
+                if not history: raise ValueError('No previous suitable panorama in this group')
+                desired = history[-1]
+            # Suitability only governs picking new images; the shown one is cropped to any layout (e.g. one monitor left).
+            keep = args.command in ('fit','reload','static') and not args.id
+            row = next((r for r in rows if r['id']==desired and (keep or framing(r,layout,settings)['valid'])),None)
             if args.id and row is None: raise ValueError('Requested panorama is unsuitable or unknown')
             seen = state.get('seen',[])
             if row is None:
                 if not eligible: raise ValueError(unsuitable)
-                available = [r for r in eligible if r['id'] not in seen]
+                available = [r for r in eligible if r['id'] not in seen and r['id']!=state.get('panorama')]
                 if not available:
                     seen=[]
                     available=[r for r in eligible if r['id']!=state.get('panorama')] or eligible
@@ -402,12 +517,13 @@ def main():
                 print(json.dumps(dict(panorama=row['id'],framing=frame,destination=str(args.destination)),indent=2)); return
             generation=generation_path(row,layout,settings)
             if not ready(generation,layout):
-                if args.command in ('fit','reload','static'): prepare([row],layout,settings)
-                else: raise ValueError(f'Cache missing; run "{APP} prepare" first')
+                prepare([row],layout,settings)
             changed = apply(layout,generation)
             if row['id'] not in seen: seen.append(row['id'])
+            if not history or history[-1]!=row['id']: history.append(row['id'])
             atomic(STATE/'state.json',json.dumps(dict(panorama=row['id'],title=row['title'],updated=time.time(),
-                eligible=len(eligible),collection=len(rows),seen=seen,layout=layout,generation=str(generation)),indent=2))
+                eligible=len(eligible),collection=len(rows),seen=seen,history=history[-50:],layout=layout,generation=str(generation)),indent=2))
+            if args.command=='configure': save_settings(settings)
             verb = 'Applied' if changed else 'Already showing'
             print(f"{verb} {row['id']} on {', '.join(o['name'] for o in layout['outputs'])}; {len(eligible)} suitable panoramas",flush=True)
             if args.command=='static':
